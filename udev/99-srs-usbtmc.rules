@@ -1,0 +1,1 @@
+SUBSYSTEM=="usbmisc", KERNEL=="usbtmc*", ATTRS{idVendor}=="b506", ATTRS{idProduct}=="2000", MODE="0660", GROUP="plugdev"
