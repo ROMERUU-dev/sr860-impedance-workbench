@@ -40,6 +40,26 @@ Al terminar, el ejecutable queda en:
 dist\SR860_Impedance_Workbench.exe
 ```
 
+## Instalador para Windows
+
+El repo también incluye un instalador con Inno Setup:
+
+```text
+windows/SR860_Impedance_Workbench.iss
+```
+
+Después de compilar el `.exe` con PyInstaller, genera el instalador con:
+
+```powershell
+iscc .\windows\SR860_Impedance_Workbench.iss
+```
+
+Eso produce un instalador en:
+
+```text
+dist_installer\SR860_Impedance_Workbench_Setup_v0.1.0.exe
+```
+
 ## Dependencias de build para Windows
 
 Se instalan automáticamente desde:
@@ -56,6 +76,12 @@ Flujo recomendado:
 2. Hacer el primer commit.
 3. Crear el repo remoto en GitHub.
 4. Subir por SSH.
+
+Repo publicado:
+
+```text
+https://github.com/ROMERUU-dev/sr860-impedance-workbench
+```
 
 ## Nota sobre conexión USBTMC en Linux
 

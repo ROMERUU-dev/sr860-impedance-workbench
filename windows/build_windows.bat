@@ -14,3 +14,6 @@ call .venv-win\Scripts\pyinstaller.exe --noconfirm --clean windows\SR860_Impedan
 echo.
 echo Build completado.
 echo Ejecutable: dist\SR860_Impedance_Workbench.exe
+echo.
+echo Si tienes Inno Setup instalado, compila tambien:
+echo   iscc windows\SR860_Impedance_Workbench.iss

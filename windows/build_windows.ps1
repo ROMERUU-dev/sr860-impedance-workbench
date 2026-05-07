@@ -15,3 +15,6 @@ if (-not (Test-Path ".venv-win")) {
 Write-Host ""
 Write-Host "Build completado."
 Write-Host "Ejecutable: dist\SR860_Impedance_Workbench.exe"
+Write-Host ""
+Write-Host "Si tienes Inno Setup instalado, compila tambien:"
+Write-Host '  iscc .\windows\SR860_Impedance_Workbench.iss'
