@@ -127,6 +127,15 @@ OUTPUT_CONNECTION_OPTIONS = ("Single-ended", "Differential")
 OUTPUT_LOAD_OPTIONS = ("High-Z", "50 Ω")
 DUT_TYPE_OPTIONS = ("Resistencia", "Capacitor", "Inductor", "Impedancia mixta")
 PLOT_MODE_OPTIONS = ("Auto", "R/X/Z/Fase", "R/C/Z/L")
+EXPORT_CHART_OPTIONS = {
+    "dashboard": "Panel 2x2 actual",
+    "r": "R vs frecuencia",
+    "xz": "Xz vs frecuencia",
+    "c": "C vs frecuencia",
+    "z": "|Z| vs frecuencia",
+    "phase": "Fase vs frecuencia",
+    "l": "L vs frecuencia",
+}
 
 
 def resource_path(relative_path: str) -> Path:
@@ -191,12 +200,14 @@ class MeasurementPoint:
 
     @property
     def capacitance_f(self) -> float:
+        # Capacitancia equivalente serie: Zc = -j / (omega*C).
         if self.x_ohm >= 0 or self.frequency_hz <= 0:
             return math.nan
         return -1.0 / (2.0 * math.pi * self.frequency_hz * self.x_ohm)
 
     @property
     def inductance_h(self) -> float:
+        # Inductancia equivalente serie: Zl = j*omega*L.
         if self.x_ohm <= 0 or self.frequency_hz <= 0:
             return math.nan
         return self.x_ohm / (2.0 * math.pi * self.frequency_hz)
@@ -488,12 +499,18 @@ class SR860ImpedanceApp:
         self.coupling_dc_var = tk.BooleanVar(value=False)
         self.shield_ground_var = tk.BooleanVar(value=False)
         self.sync_filter_var = tk.BooleanVar(value=False)
+        self.export_chart_vars = {
+            key: tk.BooleanVar(value=True)
+            for key in EXPORT_CHART_OPTIONS
+        }
 
         # La amplitud efectiva se recalcula automáticamente cuando cambia
         # la amplitud programada o la topología de conexión seleccionada.
         self.output_amplitude_var.trace_add("write", self._schedule_effective_source_refresh)
         self.output_connection_var.trace_add("write", self._schedule_effective_source_refresh)
         self.output_load_var.trace_add("write", self._schedule_effective_source_refresh)
+        self.dut_type_var.trace_add("write", self._schedule_plot_refresh)
+        self.plot_mode_var.trace_add("write", self._schedule_plot_refresh)
 
     def _build_layout(self) -> None:
         root_grid = ttk.Frame(self.root, style="Panel.TFrame", padding=14)
@@ -629,6 +646,17 @@ class SR860ImpedanceApp:
         ttk.Button(frame, text="Exportar sesión", style="Soft.TButton", command=self.export_session).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
         ttk.Button(frame, text="Exportar CSV", style="Soft.TButton", command=self.export_csv).grid(row=2, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
         ttk.Button(frame, text="Exportar SVG", style="Soft.TButton", command=self.export_svg).grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+
+        export_frame = ttk.Frame(frame, style="Panel.TFrame")
+        export_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        export_frame.columnconfigure((0, 1), weight=1)
+
+        for index, (key, label) in enumerate(EXPORT_CHART_OPTIONS.items()):
+            ttk.Checkbutton(
+                export_frame,
+                text=label,
+                variable=self.export_chart_vars[key],
+            ).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 8), pady=(2, 0))
 
     def _build_status_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Estado", style="Section.TLabelframe", padding=12)
@@ -940,6 +968,9 @@ class SR860ImpedanceApp:
         # evita recalcular en medio de una edición parcial.
         self.root.after_idle(self.refresh_effective_source_from_model)
 
+    def _schedule_plot_refresh(self, *_args: object) -> None:
+        self.root.after_idle(self._refresh_plots)
+
     def refresh_effective_source_from_model(self) -> None:
         try:
             programmed_amplitude = float(self.output_amplitude_var.get())
@@ -1239,6 +1270,10 @@ class SR860ImpedanceApp:
                 "shield_grounded": self.shield_ground_var.get(),
                 "sync_filter": self.sync_filter_var.get(),
                 "plot_mode": self._current_plot_mode(),
+                "selected_svg_exports": [
+                    key for key, var in self.export_chart_vars.items()
+                    if var.get()
+                ],
             },
             "measurements": [
                 {
@@ -1324,9 +1359,70 @@ class SR860ImpedanceApp:
 
         self.status_var.set(f"CSV exportado en {filename}")
 
+    def _svg_chart_payloads(self) -> dict[str, tuple[str, str, str, np.ndarray, np.ndarray, str]]:
+        freqs = np.array([p.frequency_hz for p in self.measurements], dtype=float)
+        return {
+            "r": (
+                "r_vs_freq.svg",
+                "R vs Frecuencia",
+                "R [Ω]",
+                freqs,
+                np.array([p.r_ohm for p in self.measurements], dtype=float),
+                self.colors["line_1"],
+            ),
+            "xz": (
+                "xz_vs_freq.svg",
+                "Xz vs Frecuencia",
+                "Xz [Ω]",
+                freqs,
+                np.array([p.x_ohm for p in self.measurements], dtype=float),
+                self.colors["line_2"],
+            ),
+            "c": (
+                "c_vs_freq.svg",
+                "C vs Frecuencia",
+                "C [F]",
+                freqs,
+                np.array([p.capacitance_f for p in self.measurements], dtype=float),
+                self.colors["line_2"],
+            ),
+            "z": (
+                "z_vs_freq.svg",
+                "|Z| vs Frecuencia",
+                "|Z| [Ω]",
+                freqs,
+                np.array([p.z_abs_ohm for p in self.measurements], dtype=float),
+                self.colors["line_3"],
+            ),
+            "phase": (
+                "phase_vs_freq.svg",
+                "Fase de Z vs Frecuencia",
+                "Fase [deg]",
+                freqs,
+                np.array([p.phase_deg for p in self.measurements], dtype=float),
+                self.colors["line_4"],
+            ),
+            "l": (
+                "l_vs_freq.svg",
+                "L vs Frecuencia",
+                "L [H]",
+                freqs,
+                np.array([p.inductance_h for p in self.measurements], dtype=float),
+                self.colors["line_4"],
+            ),
+        }
+
     def export_svg(self) -> None:
         if not self.measurements:
             messagebox.showinfo("Exportar SVG", "Todavía no hay datos para exportar.")
+            return
+
+        selected_keys = [
+            key for key, var in self.export_chart_vars.items()
+            if var.get()
+        ]
+        if not selected_keys:
+            messagebox.showinfo("Exportar SVG", "Selecciona al menos una gráfica para exportar.")
             return
 
         output_dir = filedialog.askdirectory(title="Selecciona la carpeta para los SVG")
@@ -1334,19 +1430,19 @@ class SR860ImpedanceApp:
             return
 
         output_path = Path(output_dir)
-        dashboard_path = output_path / "sr860_dashboard.svg"
-        self.figure.savefig(dashboard_path, format="svg", bbox_inches="tight")
+        exported_files: list[str] = []
 
-        chart_payloads = [
-            ("r_vs_freq.svg", "R vs Frecuencia", "R [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.r_ohm for p in self.measurements]), self.colors["line_1"]),
-            ("xz_vs_freq.svg", "Xz vs Frecuencia", "Xz [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.x_ohm for p in self.measurements]), self.colors["line_2"]),
-            ("c_vs_freq.svg", "C vs Frecuencia", "C [F]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.capacitance_f for p in self.measurements]), self.colors["line_2"]),
-            ("z_vs_freq.svg", "|Z| vs Frecuencia", "|Z| [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.z_abs_ohm for p in self.measurements]), self.colors["line_3"]),
-            ("phase_vs_freq.svg", "Fase de Z vs Frecuencia", "Fase [deg]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.phase_deg for p in self.measurements]), self.colors["line_4"]),
-            ("l_vs_freq.svg", "L vs Frecuencia", "L [H]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.inductance_h for p in self.measurements]), self.colors["line_4"]),
-        ]
+        if "dashboard" in selected_keys:
+            dashboard_path = output_path / "sr860_dashboard.svg"
+            self.figure.savefig(dashboard_path, format="svg", bbox_inches="tight")
+            exported_files.append(dashboard_path.name)
 
-        for filename, title, ylabel, freqs, values, color in chart_payloads:
+        chart_payloads = self._svg_chart_payloads()
+
+        for key in selected_keys:
+            if key == "dashboard":
+                continue
+            filename, title, ylabel, freqs, values, color = chart_payloads[key]
             single_figure = Figure(figsize=(6.4, 4.0), dpi=100, facecolor="white")
             axis = single_figure.add_subplot(111)
             axis.set_facecolor("white")
@@ -1361,8 +1457,9 @@ class SR860ImpedanceApp:
                 axis.plot(freqs[valid], values[valid], color=color, linewidth=2.2)
 
             single_figure.savefig(output_path / filename, format="svg", bbox_inches="tight")
+            exported_files.append(filename)
 
-        self.status_var.set(f"SVG exportados en {output_path}")
+        self.status_var.set(f"SVG exportados en {output_path}: {', '.join(exported_files)}")
 
 
 def main() -> None:

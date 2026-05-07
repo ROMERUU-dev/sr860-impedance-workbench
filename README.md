@@ -9,8 +9,27 @@ Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visu
 - Barrido de impedancia usando resistencia serie conocida.
 - Vista automática para resistencias con `R`, `Xz`, `|Z|` y fase contra frecuencia.
 - Vista general con `R`, `C`, `|Z|` y `L` contra frecuencia.
-- Exportación de CSV, SVG y sesión completa en JSON.
+- Exportación de CSV, SVG seleccionables y sesión completa en JSON.
 - Panel de configuración con scroll para pantallas pequeñas.
+
+## Modelo matemático
+
+La app asume un montaje de divisor serie con resistencia conocida `Rs` y DUT:
+
+```text
+Zdut = Rs * Vdut / (Vsource - Vdut)
+```
+
+Desde la impedancia compleja `Z = R + jXz`, calcula:
+
+```text
+R = real(Z)
+|Z| = abs(Z)
+Cserie = -1 / (2*pi*f*Xz), sólo si Xz < 0
+Lserie = Xz / (2*pi*f), sólo si Xz > 0
+```
+
+`C` y `L` son equivalentes serie derivados de la reactancia. Para una resistencia ideal deberían ser inexistentes o poco estables, porque `Xz` se acerca a cero.
 
 ## Estado del proyecto
 
