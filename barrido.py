@@ -16,6 +16,7 @@ factor x10 y bastante más cómoda para operar desde laboratorio.
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
 import queue
@@ -124,6 +125,8 @@ FILTER_SLOPE_FROM_CODE = {value: key for key, value in FILTER_SLOPE_OPTIONS.item
 
 OUTPUT_CONNECTION_OPTIONS = ("Single-ended", "Differential")
 OUTPUT_LOAD_OPTIONS = ("High-Z", "50 Ω")
+DUT_TYPE_OPTIONS = ("Resistencia", "Capacitor", "Inductor", "Impedancia mixta")
+PLOT_MODE_OPTIONS = ("Auto", "R/X/Z/Fase", "R/C/Z/L")
 
 
 def resource_path(relative_path: str) -> Path:
@@ -136,6 +139,9 @@ def resource_path(relative_path: str) -> Path:
 
 @dataclass
 class SweepConfig:
+    dut_name: str
+    dut_type_label: str
+    plot_mode_label: str
     start_freq_hz: float
     stop_freq_hz: float
     points: int
@@ -385,6 +391,7 @@ class SR860ImpedanceApp:
         self.worker: Optional[threading.Thread] = None
         self.stop_requested = False
         self.gui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.sidebar_canvas: Optional[tk.Canvas] = None
 
         self._build_style()
         self._apply_window_icon()
@@ -455,6 +462,10 @@ class SR860ImpedanceApp:
         self.status_var = tk.StringVar(value="Listo para conectar al SR860")
         self.progress_var = tk.StringVar(value="Sin mediciones")
 
+        self.dut_name_var = tk.StringVar(value="DUT")
+        self.dut_type_var = tk.StringVar(value="Resistencia")
+        self.plot_mode_var = tk.StringVar(value="Auto")
+
         self.start_freq_var = tk.StringVar(value="100")
         self.stop_freq_var = tk.StringVar(value="500000")
         self.points_var = tk.StringVar(value="60")
@@ -491,8 +502,27 @@ class SR860ImpedanceApp:
         root_grid.columnconfigure(1, weight=1)
         root_grid.rowconfigure(0, weight=1)
 
-        self.sidebar = ttk.Frame(root_grid, style="Panel.TFrame", padding=(0, 0, 14, 0))
-        self.sidebar.grid(row=0, column=0, sticky="ns")
+        self.sidebar_outer = ttk.Frame(root_grid, style="Panel.TFrame", padding=(0, 0, 10, 0))
+        self.sidebar_outer.grid(row=0, column=0, sticky="ns")
+        self.sidebar_outer.rowconfigure(0, weight=1)
+        self.sidebar_outer.columnconfigure(0, weight=1)
+
+        self.sidebar_canvas = tk.Canvas(
+            self.sidebar_outer,
+            width=340,
+            highlightthickness=0,
+            background=self.colors["panel"],
+        )
+        self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_outer, orient="vertical", command=self.sidebar_canvas.yview)
+        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
+        self.sidebar_canvas.grid(row=0, column=0, sticky="ns")
+        self.sidebar_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.sidebar = ttk.Frame(self.sidebar_canvas, style="Panel.TFrame", padding=(0, 0, 8, 0))
+        self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.sidebar, anchor="nw")
+        self.sidebar.bind("<Configure>", self._sync_sidebar_scroll_region)
+        self.sidebar_canvas.bind("<Configure>", self._sync_sidebar_width)
+        self.sidebar_canvas.bind_all("<MouseWheel>", self._on_sidebar_mousewheel)
 
         self.content = ttk.Frame(root_grid, style="Panel.TFrame")
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -515,6 +545,21 @@ class SR860ImpedanceApp:
         self._build_actions_panel()
         self._build_status_panel()
 
+    def _sync_sidebar_scroll_region(self, _event: tk.Event) -> None:
+        if self.sidebar_canvas is not None:
+            self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+
+    def _sync_sidebar_width(self, event: tk.Event) -> None:
+        if self.sidebar_canvas is not None:
+            self.sidebar_canvas.itemconfigure(self.sidebar_window, width=event.width)
+
+    def _on_sidebar_mousewheel(self, event: tk.Event) -> None:
+        if self.sidebar_canvas is None:
+            return
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        if widget is not None and str(widget).startswith(str(self.sidebar_canvas)):
+            self.sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
     def _build_connection_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Conexión", style="Section.TLabelframe", padding=12)
         frame.pack(fill="x", pady=(0, 10))
@@ -529,54 +574,61 @@ class SR860ImpedanceApp:
         buttons.columnconfigure((0, 1), weight=1)
         ttk.Button(buttons, text="Actualizar", style="Soft.TButton", command=self.refresh_resources).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         ttk.Button(buttons, text="Conectar", style="Accent.TButton", command=self.connect_instrument).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Button(frame, text="Diagnóstico de conexión", style="Soft.TButton", command=self.run_connection_diagnostic).grid(row=3, column=0, sticky="ew", pady=(10, 0))
 
-        ttk.Label(frame, text="Instrumento").grid(row=3, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.idn_var, wraplength=290, style="Muted.TLabel").grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(frame, text="Instrumento").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.idn_var, wraplength=290, style="Muted.TLabel").grid(row=5, column=0, sticky="ew", pady=(4, 0))
 
     def _build_setup_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Setup del Equipo", style="Section.TLabelframe", padding=12)
         frame.pack(fill="x", pady=(0, 10))
         frame.columnconfigure(1, weight=1)
 
-        self._add_labeled_entry(frame, 0, "Frecuencia inicial [Hz]", self.start_freq_var)
-        self._add_labeled_entry(frame, 1, "Frecuencia final [Hz]", self.stop_freq_var)
-        self._add_labeled_entry(frame, 2, "Número de puntos", self.points_var)
+        self._add_labeled_entry(frame, 0, "Nombre del DUT", self.dut_name_var)
+        self._add_labeled_combo(frame, 1, "Tipo de DUT", self.dut_type_var, list(DUT_TYPE_OPTIONS))
+        self._add_labeled_combo(frame, 2, "Vista de gráficas", self.plot_mode_var, list(PLOT_MODE_OPTIONS))
 
-        ttk.Checkbutton(frame, text="Barrido logarítmico", variable=self.log_sweep_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        self._add_labeled_entry(frame, 3, "Frecuencia inicial [Hz]", self.start_freq_var)
+        self._add_labeled_entry(frame, 4, "Frecuencia final [Hz]", self.stop_freq_var)
+        self._add_labeled_entry(frame, 5, "Número de puntos", self.points_var)
 
-        self._add_labeled_entry(frame, 4, "Resistencia serie Rs [Ω]", self.series_resistor_var)
-        self._add_labeled_entry(frame, 5, "Amplitud SR860 [V]", self.output_amplitude_var)
-        self._add_labeled_combo(frame, 6, "Uso de salida", self.output_connection_var, list(OUTPUT_CONNECTION_OPTIONS))
-        self._add_labeled_combo(frame, 7, "Carga estimada", self.output_load_var, list(OUTPUT_LOAD_OPTIONS))
-        self._add_labeled_entry(frame, 8, "Amplitud efectiva en DUT [V]", self.effective_source_var)
-        self._add_labeled_entry(frame, 9, "Fase [deg]", self.phase_var)
-        self._add_labeled_entry(frame, 10, "Offset DC [V]", self.offset_var)
-        self._add_labeled_entry(frame, 11, "Factor de asentamiento", self.settling_factor_var)
+        ttk.Checkbutton(frame, text="Barrido logarítmico", variable=self.log_sweep_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
-        self._add_labeled_combo(frame, 12, "Time constant", self.time_constant_var, list(TIME_CONSTANT_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 13, "Pendiente de filtro", self.filter_slope_var, list(FILTER_SLOPE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 14, "Fuente de referencia", self.reference_source_var, list(REFERENCE_SOURCE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 15, "Modo de entrada", self.input_mode_var, list(INPUT_MODE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 16, "Rango de entrada", self.input_range_var, list(INPUT_RANGE_OPTIONS.keys()))
+        self._add_labeled_entry(frame, 7, "Resistencia serie Rs [Ω]", self.series_resistor_var)
+        self._add_labeled_entry(frame, 8, "Amplitud SR860 [V]", self.output_amplitude_var)
+        self._add_labeled_combo(frame, 9, "Uso de salida", self.output_connection_var, list(OUTPUT_CONNECTION_OPTIONS))
+        self._add_labeled_combo(frame, 10, "Carga estimada", self.output_load_var, list(OUTPUT_LOAD_OPTIONS))
+        self._add_labeled_entry(frame, 11, "Amplitud efectiva en DUT [V]", self.effective_source_var)
+        self._add_labeled_entry(frame, 12, "Fase [deg]", self.phase_var)
+        self._add_labeled_entry(frame, 13, "Offset DC [V]", self.offset_var)
+        self._add_labeled_entry(frame, 14, "Factor de asentamiento", self.settling_factor_var)
 
-        ttk.Checkbutton(frame, text="Acoplamiento DC", variable=self.coupling_dc_var).grid(row=17, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(frame, text="Blindaje a tierra", variable=self.shield_ground_var).grid(row=18, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(frame, text="Sync filter", variable=self.sync_filter_var).grid(row=19, column=0, columnspan=2, sticky="w")
+        self._add_labeled_combo(frame, 15, "Time constant", self.time_constant_var, list(TIME_CONSTANT_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 16, "Pendiente de filtro", self.filter_slope_var, list(FILTER_SLOPE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 17, "Fuente de referencia", self.reference_source_var, list(REFERENCE_SOURCE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 18, "Modo de entrada", self.input_mode_var, list(INPUT_MODE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 19, "Rango de entrada", self.input_range_var, list(INPUT_RANGE_OPTIONS.keys()))
 
-        ttk.Button(frame, text="Leer amplitud del SR860", style="Soft.TButton", command=self.load_source_from_instrument).grid(row=20, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Button(frame, text="Leer config del SR860", style="Soft.TButton", command=self.load_setup_from_instrument).grid(row=21, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(frame, text="Reestimar amplitud efectiva", style="Soft.TButton", command=self.refresh_effective_source_from_model).grid(row=22, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(frame, text="Aplicar setup al equipo", style="Accent.TButton", command=self.apply_setup_to_instrument).grid(row=23, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(frame, text="Acoplamiento DC", variable=self.coupling_dc_var).grid(row=20, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(frame, text="Blindaje a tierra", variable=self.shield_ground_var).grid(row=21, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="Sync filter", variable=self.sync_filter_var).grid(row=22, column=0, columnspan=2, sticky="w")
+
+        ttk.Button(frame, text="Leer amplitud del SR860", style="Soft.TButton", command=self.load_source_from_instrument).grid(row=23, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(frame, text="Leer config del SR860", style="Soft.TButton", command=self.load_setup_from_instrument).grid(row=24, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(frame, text="Reestimar amplitud efectiva", style="Soft.TButton", command=self.refresh_effective_source_from_model).grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(frame, text="Aplicar setup al equipo", style="Accent.TButton", command=self.apply_setup_to_instrument).grid(row=26, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     def _build_actions_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Medición y Exportación", style="Section.TLabelframe", padding=12)
         frame.pack(fill="x", pady=(0, 10))
         frame.columnconfigure((0, 1), weight=1)
 
-        ttk.Button(frame, text="Iniciar barrido", style="Accent.TButton", command=self.start_sweep).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(frame, text="Detener", style="Soft.TButton", command=self.stop_sweep).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ttk.Button(frame, text="Exportar CSV", style="Soft.TButton", command=self.export_csv).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
-        ttk.Button(frame, text="Exportar SVG", style="Soft.TButton", command=self.export_svg).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+        ttk.Button(frame, text="Medición única", style="Soft.TButton", command=self.take_single_measurement).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(frame, text="Iniciar barrido", style="Accent.TButton", command=self.start_sweep).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Button(frame, text="Detener", style="Soft.TButton", command=self.stop_sweep).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
+        ttk.Button(frame, text="Exportar sesión", style="Soft.TButton", command=self.export_session).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
+        ttk.Button(frame, text="Exportar CSV", style="Soft.TButton", command=self.export_csv).grid(row=2, column=0, sticky="ew", padx=(0, 4), pady=(8, 0))
+        ttk.Button(frame, text="Exportar SVG", style="Soft.TButton", command=self.export_svg).grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=(8, 0))
 
     def _build_status_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Estado", style="Section.TLabelframe", padding=12)
@@ -605,18 +657,20 @@ class SR860ImpedanceApp:
         table_frame = ttk.Frame(plot_panel, style="Panel.TFrame")
         table_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
-        columns = ("f", "x", "y", "r", "z", "c", "l")
+        columns = ("f", "x", "y", "r", "reactance", "z", "phase", "c", "l")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=6)
         headings = {
             "f": "Freq [Hz]",
             "x": "X [V]",
             "y": "Y [V]",
             "r": "R [Ω]",
+            "reactance": "Xz [Ω]",
             "z": "|Z| [Ω]",
+            "phase": "Fase [deg]",
             "c": "C [F]",
             "l": "L [H]",
         }
-        widths = {"f": 120, "x": 110, "y": 110, "r": 110, "z": 110, "c": 140, "l": 140}
+        widths = {"f": 105, "x": 100, "y": 100, "r": 100, "reactance": 100, "z": 100, "phase": 95, "c": 120, "l": 120}
         for key in columns:
             self.table.heading(key, text=headings[key])
             self.table.column(key, width=widths[key], anchor="center")
@@ -633,12 +687,7 @@ class SR860ImpedanceApp:
         ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", width=14).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(0, 4))
 
     def _draw_empty_plots(self) -> None:
-        labels = [
-            ("R vs Frecuencia", "R [Ω]"),
-            ("C vs Frecuencia", "C"),
-            ("|Z| vs Frecuencia", "|Z| [Ω]"),
-            ("L vs Frecuencia", "L"),
-        ]
+        labels = self._current_plot_labels()
         for index, (ax, (title, ylabel)) in enumerate(zip(self.axes.flat, labels)):
             ax.clear()
             ax.set_facecolor("#fbfcfe")
@@ -651,6 +700,29 @@ class SR860ImpedanceApp:
             ax.grid(True, which="both", color=self.colors["grid"], alpha=0.9)
             ax.set_xscale("log")
         self.canvas.draw_idle()
+
+    def _current_plot_mode(self) -> str:
+        selected = self.plot_mode_var.get()
+        if selected != "Auto":
+            return selected
+        if self.dut_type_var.get() == "Resistencia":
+            return "R/X/Z/Fase"
+        return "R/C/Z/L"
+
+    def _current_plot_labels(self) -> list[tuple[str, str]]:
+        if self._current_plot_mode() == "R/X/Z/Fase":
+            return [
+                ("R vs Frecuencia", "R [Ω]"),
+                ("Xz vs Frecuencia", "Xz [Ω]"),
+                ("|Z| vs Frecuencia", "|Z| [Ω]"),
+                ("Fase de Z vs Frecuencia", "Fase [deg]"),
+            ]
+        return [
+            ("R vs Frecuencia", "R [Ω]"),
+            ("C vs Frecuencia", "C"),
+            ("|Z| vs Frecuencia", "|Z| [Ω]"),
+            ("L vs Frecuencia", "L"),
+        ]
 
     def refresh_resources(self) -> None:
         try:
@@ -684,6 +756,7 @@ class SR860ImpedanceApp:
                 f"Detalle: {exc}",
             )
             self.status_var.set("El instrumento existe, pero falta permiso sobre el nodo USBTMC.")
+            return
         except Exception as exc:
             messagebox.showerror("Conexión", f"No se pudo conectar al SR860.\n\n{exc}")
             self.status_var.set("Falló la conexión con el instrumento.")
@@ -691,6 +764,44 @@ class SR860ImpedanceApp:
 
         self.idn_var.set(idn)
         self.status_var.set("Conexión establecida con el SR860.")
+
+    def run_connection_diagnostic(self) -> None:
+        resource = self.resource_var.get().strip()
+        if not resource:
+            messagebox.showwarning("Diagnóstico", "Selecciona un recurso antes de diagnosticar.")
+            return
+
+        try:
+            if self.controller.inst is None and self.controller.raw_handle is None:
+                idn = self.controller.connect(resource)
+            else:
+                idn = self.controller.query("*IDN?")
+
+            freq = self.controller.query("FREQ?")
+            amplitude = self.controller.query("SLVL?")
+            x_v, y_v = self.controller.read_snapshot_xy()
+        except PermissionError as exc:
+            messagebox.showerror(
+                "Diagnóstico de conexión",
+                "El instrumento fue detectado, pero el sistema no permite abrirlo.\n\n"
+                f"{exc}",
+            )
+            self.status_var.set("Diagnóstico: falta permiso sobre el recurso seleccionado.")
+            return
+        except Exception as exc:
+            messagebox.showerror("Diagnóstico de conexión", f"El diagnóstico falló.\n\n{exc}")
+            self.status_var.set("Diagnóstico fallido: revisa conexión, permisos o backend VISA.")
+            return
+
+        self.idn_var.set(idn)
+        self.status_var.set("Diagnóstico correcto: el instrumento responde y entrega X/Y.")
+        messagebox.showinfo(
+            "Diagnóstico de conexión",
+            f"*IDN?: {idn}\n"
+            f"FREQ?: {freq} Hz\n"
+            f"SLVL?: {amplitude} V\n"
+            f"SNAP? X,Y: X={x_v:.6e} V, Y={y_v:.6e} V",
+        )
 
     def load_source_from_instrument(self) -> None:
         try:
@@ -798,6 +909,9 @@ class SR860ImpedanceApp:
             raise ValueError("Selecciona una time constant válida.")
 
         return SweepConfig(
+            dut_name=self.dut_name_var.get().strip() or "DUT",
+            dut_type_label=self.dut_type_var.get(),
+            plot_mode_label=self.plot_mode_var.get(),
             start_freq_hz=start_freq,
             stop_freq_hz=stop_freq,
             points=points,
@@ -894,6 +1008,35 @@ class SR860ImpedanceApp:
         self.worker = threading.Thread(target=self._run_sweep, args=(config,), daemon=True)
         self.worker.start()
 
+    def take_single_measurement(self) -> None:
+        try:
+            config = self._collect_config()
+            self.controller.require_connection()
+        except Exception as exc:
+            messagebox.showerror("Medición única", str(exc))
+            return
+
+        try:
+            self.controller.apply_setup(config)
+            if config.reference_source_label == "Internal":
+                self.controller.write(f"FREQ {config.start_freq_hz}")
+            time.sleep(config.settling_factor * config.time_constant_seconds)
+            x_v, y_v = self.controller.read_snapshot_xy()
+            point = self._compute_measurement_point(config, config.start_freq_hz, x_v, y_v)
+        except Exception as exc:
+            messagebox.showerror("Medición única", f"No se pudo medir el punto.\n\n{exc}")
+            self.status_var.set("Medición única fallida.")
+            return
+
+        self.measurements.append(point)
+        self._append_table_row(point)
+        self._refresh_plots()
+        self.status_var.set(
+            f"Medición única: f={point.frequency_hz:.3f} Hz | R={point.r_ohm:.3f} Ω | "
+            f"Xz={point.x_ohm:.3f} Ω | fase={point.phase_deg:.3f}°"
+        )
+        self.progress_var.set(f"Se capturaron {len(self.measurements)} punto(s).")
+
     def stop_sweep(self) -> None:
         self.stop_requested = True
         self.status_var.set("Se solicitó detener el barrido.")
@@ -969,7 +1112,10 @@ class SR860ImpedanceApp:
                 messagebox.showerror("Barrido", str(payload))
                 self.status_var.set("El barrido terminó con error.")
             elif event == "done":
-                self.status_var.set(str(payload))
+                if self.measurements:
+                    self.status_var.set(str(payload))
+                else:
+                    self.status_var.set("Barrido terminado sin puntos válidos.")
                 self.progress_var.set(f"Se capturaron {len(self.measurements)} puntos.")
 
         self.root.after(120, self._poll_gui_queue)
@@ -980,7 +1126,9 @@ class SR860ImpedanceApp:
             f"{point.x_v:.6e}",
             f"{point.y_v:.6e}",
             f"{point.r_ohm:.6e}",
+            f"{point.x_ohm:.6e}",
             f"{point.z_abs_ohm:.6e}",
+            f"{point.phase_deg:.6e}",
             f"{point.capacitance_f:.6e}" if math.isfinite(point.capacitance_f) else "nan",
             f"{point.inductance_h:.6e}" if math.isfinite(point.inductance_h) else "nan",
         )
@@ -1000,6 +1148,8 @@ class SR860ImpedanceApp:
 
         freqs = np.array([p.frequency_hz for p in self.measurements], dtype=float)
         r_values = np.array([p.r_ohm for p in self.measurements], dtype=float)
+        x_values = np.array([p.x_ohm for p in self.measurements], dtype=float)
+        phase_values = np.array([p.phase_deg for p in self.measurements], dtype=float)
         c_values = np.array([p.capacitance_f for p in self.measurements], dtype=float)
         z_values = np.array([p.z_abs_ohm for p in self.measurements], dtype=float)
         l_values = np.array([p.inductance_h for p in self.measurements], dtype=float)
@@ -1007,12 +1157,20 @@ class SR860ImpedanceApp:
         c_scaled, c_unit = self._auto_scale_series(c_values, "F")
         l_scaled, l_unit = self._auto_scale_series(l_values, "H")
 
-        plot_specs = [
-            (self.axes[0, 0], r_values, "R vs Frecuencia", "R [Ω]", self.colors["line_1"]),
-            (self.axes[0, 1], c_scaled, "C vs Frecuencia", f"C [{c_unit}]", self.colors["line_2"]),
-            (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
-            (self.axes[1, 1], l_scaled, "L vs Frecuencia", f"L [{l_unit}]", self.colors["line_4"]),
-        ]
+        if self._current_plot_mode() == "R/X/Z/Fase":
+            plot_specs = [
+                (self.axes[0, 0], r_values, "R vs Frecuencia", "R [Ω]", self.colors["line_1"]),
+                (self.axes[0, 1], x_values, "Xz vs Frecuencia", "Xz [Ω]", self.colors["line_2"]),
+                (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
+                (self.axes[1, 1], phase_values, "Fase de Z vs Frecuencia", "Fase [deg]", self.colors["line_4"]),
+            ]
+        else:
+            plot_specs = [
+                (self.axes[0, 0], r_values, "R vs Frecuencia", "R [Ω]", self.colors["line_1"]),
+                (self.axes[0, 1], c_scaled, "C vs Frecuencia", f"C [{c_unit}]", self.colors["line_2"]),
+                (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
+                (self.axes[1, 1], l_scaled, "L vs Frecuencia", f"L [{l_unit}]", self.colors["line_4"]),
+            ]
 
         for index, (ax, values, title, ylabel, color) in enumerate(plot_specs):
             ax.clear()
@@ -1051,6 +1209,72 @@ class SR860ImpedanceApp:
             if 0.1 <= scaled_peak < 1000:
                 return values * factor, unit
         return values, base_unit
+
+    def _session_payload(self) -> dict[str, object]:
+        return {
+            "app": "SR860 Impedance Workbench",
+            "dut": {
+                "name": self.dut_name_var.get().strip() or "DUT",
+                "type": self.dut_type_var.get(),
+            },
+            "setup": {
+                "start_freq_hz": self.start_freq_var.get(),
+                "stop_freq_hz": self.stop_freq_var.get(),
+                "points": self.points_var.get(),
+                "logarithmic": self.log_sweep_var.get(),
+                "series_resistor_ohm": self.series_resistor_var.get(),
+                "output_amplitude_v": self.output_amplitude_var.get(),
+                "effective_source_v": self.effective_source_var.get(),
+                "output_connection": self.output_connection_var.get(),
+                "output_load": self.output_load_var.get(),
+                "phase_deg": self.phase_var.get(),
+                "dc_offset_v": self.offset_var.get(),
+                "settling_factor": self.settling_factor_var.get(),
+                "time_constant": self.time_constant_var.get(),
+                "filter_slope": self.filter_slope_var.get(),
+                "reference_source": self.reference_source_var.get(),
+                "input_mode": self.input_mode_var.get(),
+                "input_range": self.input_range_var.get(),
+                "coupling_dc": self.coupling_dc_var.get(),
+                "shield_grounded": self.shield_ground_var.get(),
+                "sync_filter": self.sync_filter_var.get(),
+                "plot_mode": self._current_plot_mode(),
+            },
+            "measurements": [
+                {
+                    "frequency_hz": point.frequency_hz,
+                    "x_v": point.x_v,
+                    "y_v": point.y_v,
+                    "source_v": point.source_v,
+                    "r_ohm": point.r_ohm,
+                    "x_ohm": point.x_ohm,
+                    "z_abs_ohm": point.z_abs_ohm,
+                    "phase_deg": point.phase_deg,
+                    "c_f": point.capacitance_f,
+                    "l_h": point.inductance_h,
+                }
+                for point in self.measurements
+            ],
+        }
+
+    def export_session(self) -> None:
+        if not self.measurements:
+            messagebox.showinfo("Exportar sesión", "Todavía no hay datos para exportar.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title="Guardar sesión",
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json")],
+            initialfile="sr860_impedance_session.json",
+        )
+        if not filename:
+            return
+
+        with open(filename, "w", encoding="utf-8") as handle:
+            json.dump(self._session_payload(), handle, indent=2, allow_nan=True)
+
+        self.status_var.set(f"Sesión exportada en {filename}")
 
     def export_csv(self) -> None:
         if not self.measurements:
@@ -1115,8 +1339,10 @@ class SR860ImpedanceApp:
 
         chart_payloads = [
             ("r_vs_freq.svg", "R vs Frecuencia", "R [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.r_ohm for p in self.measurements]), self.colors["line_1"]),
+            ("xz_vs_freq.svg", "Xz vs Frecuencia", "Xz [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.x_ohm for p in self.measurements]), self.colors["line_2"]),
             ("c_vs_freq.svg", "C vs Frecuencia", "C [F]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.capacitance_f for p in self.measurements]), self.colors["line_2"]),
             ("z_vs_freq.svg", "|Z| vs Frecuencia", "|Z| [Ω]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.z_abs_ohm for p in self.measurements]), self.colors["line_3"]),
+            ("phase_vs_freq.svg", "Fase de Z vs Frecuencia", "Fase [deg]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.phase_deg for p in self.measurements]), self.colors["line_4"]),
             ("l_vs_freq.svg", "L vs Frecuencia", "L [H]", np.array([p.frequency_hz for p in self.measurements]), np.array([p.inductance_h for p in self.measurements]), self.colors["line_4"]),
         ]
 

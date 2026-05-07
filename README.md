@@ -2,6 +2,16 @@
 
 Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visualizar `R`, `C`, `|Z|` y `L` contra frecuencia, exportar gráficas en `SVG` y controlar el setup del instrumento desde una GUI.
 
+## Funciones principales
+
+- Diagnóstico de conexión con lectura de `*IDN?`, `FREQ?`, `SLVL?` y `SNAP? X,Y`.
+- Medición única para validar cableado y respuesta antes de un barrido completo.
+- Barrido de impedancia usando resistencia serie conocida.
+- Vista automática para resistencias con `R`, `Xz`, `|Z|` y fase contra frecuencia.
+- Vista general con `R`, `C`, `|Z|` y `L` contra frecuencia.
+- Exportación de CSV, SVG y sesión completa en JSON.
+- Panel de configuración con scroll para pantallas pequeñas.
+
 ## Estado del proyecto
 
 - GUI principal: `barrido.py`
