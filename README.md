@@ -9,6 +9,7 @@ Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visu
 - Barrido de impedancia usando resistencia serie conocida.
 - Vista automática para resistencias con `Re(Z)`, `Xz`, `|Z|` y fase contra frecuencia.
 - Vista general con `Re(Z)`, `C`, `|Z|` y `L` contra frecuencia.
+- Resumen automático por tipo de DUT para reportar resistencia, capacitancia, inductancia o impedancia mixta con rango usado, dispersión y avisos de validez.
 - Exportación de CSV, SVG seleccionables y sesión completa en JSON.
 - Panel de configuración con scroll para pantallas pequeñas.
 

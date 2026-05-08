@@ -252,6 +252,147 @@ class MeasurementPoint:
         return self.x_ohm / (2.0 * math.pi * self.frequency_hz)
 
 
+def format_si(value: float, unit: str) -> str:
+    if not math.isfinite(value):
+        return "nan"
+
+    magnitude = abs(value)
+    scales = [
+        (1e9, "G"),
+        (1e6, "M"),
+        (1e3, "k"),
+        (1.0, ""),
+        (1e-3, "m"),
+        (1e-6, "µ"),
+        (1e-9, "n"),
+        (1e-12, "p"),
+    ]
+    for scale, prefix in scales:
+        if magnitude >= scale or scale == scales[-1][0]:
+            return f"{value / scale:.4g} {prefix}{unit}"
+    return f"{value:.4g} {unit}"
+
+
+def _finite_median(values: list[float]) -> float:
+    finite = np.array([value for value in values if math.isfinite(value)], dtype=float)
+    if finite.size == 0:
+        return math.nan
+    return float(np.median(finite))
+
+
+def _finite_std(values: list[float]) -> float:
+    finite = np.array([value for value in values if math.isfinite(value)], dtype=float)
+    if finite.size < 2:
+        return 0.0
+    return float(np.std(finite, ddof=1))
+
+
+def _frequency_span(points: list[MeasurementPoint]) -> str:
+    freqs = [point.frequency_hz for point in points if math.isfinite(point.frequency_hz)]
+    if not freqs:
+        return "sin rango"
+    return f"{format_si(min(freqs), 'Hz')} a {format_si(max(freqs), 'Hz')}"
+
+
+def _relative_spread(value: float, spread: float) -> str:
+    if not math.isfinite(value) or abs(value) < 1e-30:
+        return "n/a"
+    return f"{100.0 * spread / abs(value):.3g}%"
+
+
+def build_characterization_summary(points: list[MeasurementPoint], dut_type_label: str) -> dict[str, object]:
+    if not points:
+        return {
+            "dut_type": dut_type_label,
+            "lines": ["Resumen: sin datos"],
+            "warnings": [],
+            "used_points": 0,
+        }
+
+    warnings: list[str] = []
+    total_points = len(points)
+
+    def choose(preferred: list[MeasurementPoint], fallback: list[MeasurementPoint]) -> list[MeasurementPoint]:
+        return preferred if len(preferred) >= 3 else fallback
+
+    if dut_type_label == "Resistencia":
+        candidates = [point for point in points if math.isfinite(point.r_ohm)]
+        used = choose([point for point in candidates if abs(point.phase_deg) <= 10.0], candidates)
+        value = _finite_median([point.r_ohm for point in used])
+        spread = _finite_std([point.r_ohm for point in used])
+        reactance_ratio = _finite_median(
+            [abs(point.x_ohm) / max(abs(point.r_ohm), 1e-30) for point in used if math.isfinite(point.x_ohm)]
+        )
+        if math.isfinite(reactance_ratio) and reactance_ratio > 0.05:
+            warnings.append("La reactancia no es despreciable; revisa frecuencia, cables o que el DUT sea resistivo.")
+        lines = [
+            f"Resumen Resistencia: {format_si(value, 'Ω')}",
+            f"Puntos usados: {len(used)}/{total_points} ({_frequency_span(used)})",
+            f"Dispersión: ±{format_si(spread, 'Ω')} ({_relative_spread(value, spread)})",
+            f"Fase mediana: {_finite_median([point.phase_deg for point in used]):.3g}°",
+        ]
+    elif dut_type_label == "Capacitor":
+        candidates = [
+            point for point in points
+            if math.isfinite(point.capacitance_f) and point.x_ohm < 0.0
+        ]
+        preferred = [point for point in candidates if point.phase_deg <= -75.0]
+        used = choose(preferred, candidates)
+        value = _finite_median([point.capacitance_f for point in used])
+        spread = _finite_std([point.capacitance_f for point in used])
+        series_r = _finite_median([point.r_ohm for point in used])
+        if len(candidates) < max(3, total_points // 2):
+            warnings.append("Pocos puntos se comportan como capacitor; revisa montaje o rango de frecuencia.")
+        elif len(preferred) < len(candidates) // 2:
+            warnings.append("Usa principalmente los puntos con fase cercana a -90° para reportar C.")
+        lines = [
+            f"Resumen Capacitor: {format_si(value, 'F')}",
+            f"Puntos usados: {len(used)}/{total_points} ({_frequency_span(used)})",
+            f"Dispersión: ±{format_si(spread, 'F')} ({_relative_spread(value, spread)})",
+            f"Rserie equivalente: {format_si(series_r, 'Ω')}",
+            f"Fase mediana: {_finite_median([point.phase_deg for point in used]):.3g}°",
+        ]
+    elif dut_type_label == "Inductor":
+        candidates = [
+            point for point in points
+            if math.isfinite(point.inductance_h) and point.x_ohm > 0.0
+        ]
+        preferred = [point for point in candidates if point.phase_deg >= 20.0]
+        used = choose(preferred, candidates)
+        value = _finite_median([point.inductance_h for point in used])
+        spread = _finite_std([point.inductance_h for point in used])
+        series_r = _finite_median([point.r_ohm for point in used])
+        if len(candidates) < max(3, total_points // 2):
+            warnings.append("Pocos puntos se comportan como inductor; evita overload y usa frecuencias donde Xz sea positiva.")
+        elif len(preferred) < len(candidates) // 2:
+            warnings.append("La fase inductiva es baja en varios puntos; reporta L sólo en el rango indicado.")
+        lines = [
+            f"Resumen Inductor: {format_si(value, 'H')}",
+            f"Puntos usados: {len(used)}/{total_points} ({_frequency_span(used)})",
+            f"Dispersión: ±{format_si(spread, 'H')} ({_relative_spread(value, spread)})",
+            f"Rserie equivalente: {format_si(series_r, 'Ω')}",
+            f"Fase mediana: {_finite_median([point.phase_deg for point in used]):.3g}°",
+        ]
+    else:
+        used = [point for point in points if math.isfinite(point.z_abs_ohm)]
+        lines = [
+            f"Resumen Impedancia: |Z| mediana {format_si(_finite_median([point.z_abs_ohm for point in used]), 'Ω')}",
+            f"Puntos usados: {len(used)}/{total_points} ({_frequency_span(used)})",
+            f"Re(Z) mediana: {format_si(_finite_median([point.r_ohm for point in used]), 'Ω')}",
+            f"Xz mediana: {format_si(_finite_median([point.x_ohm for point in used]), 'Ω')}",
+            f"Fase mediana: {_finite_median([point.phase_deg for point in used]):.3g}°",
+        ]
+
+    return {
+        "dut_type": dut_type_label,
+        "lines": lines,
+        "warnings": warnings,
+        "used_points": len(used),
+        "total_points": total_points,
+        "frequency_span": _frequency_span(used),
+    }
+
+
 class SR860Controller:
     """
     Encapsula la comunicación VISA.
@@ -550,6 +691,7 @@ class SR860ImpedanceApp:
         self.idn_var = tk.StringVar(value="Sin conexión")
         self.status_var = tk.StringVar(value="Listo para conectar al SR860")
         self.progress_var = tk.StringVar(value="Sin mediciones")
+        self.summary_var = tk.StringVar(value="Resumen: sin datos")
 
         self.dut_name_var = tk.StringVar(value="DUT")
         self.dut_type_var = tk.StringVar(value="Resistencia")
@@ -744,6 +886,7 @@ class SR860ImpedanceApp:
 
         ttk.Label(frame, textvariable=self.status_var, wraplength=290).pack(anchor="w")
         ttk.Label(frame, textvariable=self.progress_var, wraplength=290, style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=self.summary_var, wraplength=290, style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
 
     def _build_plot_area(self) -> None:
         plot_panel = ttk.Frame(self.content, style="Panel.TFrame")
@@ -1059,6 +1202,7 @@ class SR860ImpedanceApp:
 
     def _schedule_plot_refresh(self, *_args: object) -> None:
         self.root.after_idle(self._refresh_plots)
+        self.root.after_idle(self._update_characterization_summary)
 
     def refresh_effective_source_from_model(self) -> None:
         try:
@@ -1122,6 +1266,7 @@ class SR860ImpedanceApp:
         self.stop_requested = False
         self._clear_table()
         self._draw_empty_plots()
+        self.summary_var.set("Resumen: sin datos")
         self.progress_var.set("Iniciando barrido...")
         self.status_var.set("Aplicando setup y arrancando medición.")
 
@@ -1151,6 +1296,7 @@ class SR860ImpedanceApp:
         self.measurements.append(point)
         self._append_table_row(point)
         self._refresh_plots()
+        self._update_characterization_summary()
         self.status_var.set(
             f"Medición única: f={point.frequency_hz:.3f} Hz | Re(Z)={point.r_ohm:.3f} Ω | "
             f"Xz={point.x_ohm:.3f} Ω | fase={point.phase_deg:.3f}°"
@@ -1218,6 +1364,7 @@ class SR860ImpedanceApp:
                 self.measurements.append(payload)
                 self._append_table_row(payload)
                 self._refresh_plots()
+                self._update_characterization_summary()
                 self.status_var.set(
                     f"Último punto: {payload.frequency_hz:.3f} Hz | Re(Z)={payload.r_ohm:.3f} Ω | "
                     f"|Z|={payload.z_abs_ohm:.3f} Ω"
@@ -1232,8 +1379,10 @@ class SR860ImpedanceApp:
             elif event == "done":
                 if self.measurements:
                     self.status_var.set(str(payload))
+                    self._update_characterization_summary()
                 else:
                     self.status_var.set("Barrido terminado sin puntos válidos.")
+                    self.summary_var.set("Resumen: sin datos")
                 self.progress_var.set(f"Se capturaron {len(self.measurements)} puntos.")
 
         self.root.after(120, self._poll_gui_queue)
@@ -1258,6 +1407,15 @@ class SR860ImpedanceApp:
     def _clear_table(self) -> None:
         for item in self.table.get_children():
             self.table.delete(item)
+
+    def _current_summary(self) -> dict[str, object]:
+        return build_characterization_summary(self.measurements, self.dut_type_var.get())
+
+    def _update_characterization_summary(self) -> None:
+        summary = self._current_summary()
+        lines = [str(line) for line in summary.get("lines", [])]
+        warnings = [f"Aviso: {warning}" for warning in summary.get("warnings", [])]
+        self.summary_var.set("\n".join([*lines, *warnings]))
 
     def _refresh_plots(self) -> None:
         if not self.measurements:
@@ -1364,6 +1522,7 @@ class SR860ImpedanceApp:
                     if var.get()
                 ],
             },
+            "summary": self._current_summary(),
             "measurements": [
                 {
                     "frequency_hz": point.frequency_hz,
