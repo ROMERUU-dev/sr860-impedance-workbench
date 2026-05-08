@@ -16,11 +16,12 @@ factor x10 y bastante más cómoda para operar desde laboratorio.
 from __future__ import annotations
 
 import csv
+import errno
+import fcntl
 import json
 import math
 import os
 import queue
-import select
 import sys
 import threading
 import time
@@ -273,6 +274,8 @@ class SR860Controller:
 
         if resource_name.startswith("/dev/usbtmc"):
             self.raw_handle = open(resource_name, "r+b", buffering=0)
+            flags = fcntl.fcntl(self.raw_handle.fileno(), fcntl.F_GETFL)
+            fcntl.fcntl(self.raw_handle.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
             self.transport = "raw-usbtmc"
             return self.query("*IDN?")
 
@@ -346,21 +349,27 @@ class SR860Controller:
         deadline = time.monotonic() + timeout_s
 
         while time.monotonic() < deadline:
-            wait_s = max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([fd], [], [], wait_s)
-            if not ready:
-                break
-
-            chunk = os.read(fd, 1)
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    time.sleep(0.02)
+                    continue
+                raise
             if not chunk:
-                break
-            if chunk == b"\n":
-                break
+                time.sleep(0.02)
+                continue
+
             chunks.extend(chunk)
+            if b"\n" in chunk:
+                break
 
         if not chunks:
             raise TimeoutError("El dispositivo USBTMC no respondió antes del timeout.")
-        return chunks.decode("ascii", errors="replace").strip()
+        return chunks.split(b"\n", 1)[0].decode("ascii", errors="replace").strip()
 
     def query_float(self, command: str) -> float:
         return float(self.query(command))
