@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from barrido import impedance_from_series_divider, source_phasor_from_lockin_reference
+from barrido import impedance_from_series_divider, parse_ohms_label, source_phasor_from_lockin_reference
 
 
 class ImpedanceMathTest(unittest.TestCase):
@@ -30,6 +30,11 @@ class ImpedanceMathTest(unittest.TestCase):
         self.assertAlmostEqual(source_v.imag, -1.0, places=12)
         self.assertAlmostEqual(abs(source_v), 1.0, places=12)
         self.assertAlmostEqual(math.degrees(math.atan2(source_v.imag, source_v.real)), -90.0, places=12)
+
+    def test_parse_ohms_label_handles_gui_options(self) -> None:
+        self.assertEqual(parse_ohms_label("50 Ω"), 50.0)
+        self.assertEqual(parse_ohms_label("0 Ω"), 0.0)
+        self.assertEqual(parse_ohms_label("1 MΩ"), 1_000_000.0)
 
 
 if __name__ == "__main__":

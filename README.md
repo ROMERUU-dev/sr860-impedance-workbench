@@ -14,12 +14,13 @@ Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visu
 
 ## Modelo matemático
 
-La app asume un montaje de divisor serie con resistencia conocida `Rs` y DUT:
+La app asume un montaje de divisor serie con resistencia física conocida `Rs` y DUT. El campo `Z serie fuente/equipo` se suma internamente para modelar la impedancia serie del instrumento o fuente, de modo que `Rs` sea el valor real que se coloca en el montaje:
 
 ```text
 Vdut = X + jY
 Vsource = Veff * exp(-j*PHAS)
-Zdut = Rs * Vdut / (Vsource - Vdut)
+Rserie_total = Rs + Zserie_fuente
+Zdut = Rserie_total * Vdut / (Vsource - Vdut)
 ```
 
 `X` y `Y` vienen de `SNAP? X,Y` del SR860. La fase `PHAS` se incluye porque el instrumento rota la referencia de los detectores X/Y; si `PHAS = 0`, la ecuación se reduce al divisor serie real usado normalmente.
@@ -38,6 +39,8 @@ Lserie = Xz / (2*pi*f), sólo si Xz > 0
 Antes de medir, la app fuerza detección en fundamental (`HARM 1`) y apaga offset, ratio y expand en `X/Y/R` para que `SNAP? X,Y` sea una lectura RMS cruda del fasor de entrada.
 
 La amplitud efectiva usa el modelo oficial de SINE OUT del SR860: salida diferencial, 50 Ω por BNC, amplitud RMS dependiente de si se usa single-ended/differential y carga High-Z/50 Ω. Referencia: manual oficial de Stanford Research Systems, `SR860m.pdf` (`https://thinksrs.com/downloads/pdfs/manuals/SR860m.pdf`).
+
+Para el montaje típico con salida SINE OUT single-ended, deja `Z serie fuente/equipo = 50 Ω` y escribe en `Rs` sólo la resistencia externa real. Por ejemplo, si colocas `220 Ω`, escribe `220`; la app usará `270 Ω` en la ecuación.
 
 ## Estado del proyecto
 

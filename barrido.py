@@ -126,6 +126,7 @@ FILTER_SLOPE_FROM_CODE = {value: key for key, value in FILTER_SLOPE_OPTIONS.item
 
 OUTPUT_CONNECTION_OPTIONS = ("Single-ended", "Differential")
 OUTPUT_LOAD_OPTIONS = ("High-Z", "50 Ω")
+SOURCE_SERIES_OPTIONS = ("50 Ω", "0 Ω", "1 MΩ")
 DUT_TYPE_OPTIONS = ("Resistencia", "Capacitor", "Inductor", "Impedancia mixta")
 PLOT_MODE_OPTIONS = ("Auto", "R/X/Z/Fase", "R/C/Z/L")
 EXPORT_CHART_OPTIONS = {
@@ -172,6 +173,13 @@ def impedance_from_series_divider(series_resistor_ohm: float, source_v: complex,
     return series_resistor_ohm * dut_v / denominator
 
 
+def parse_ohms_label(value: str) -> float:
+    normalized = value.strip().replace("Ω", "").replace("ohm", "").replace("Ohm", "").strip()
+    normalized = normalized.replace(" ", "")
+    normalized = normalized.replace("M", "e6").replace("k", "e3")
+    return float(normalized)
+
+
 @dataclass
 class SweepConfig:
     dut_name: str
@@ -182,6 +190,7 @@ class SweepConfig:
     points: int
     logarithmic: bool
     series_resistor_ohm: float
+    source_series_ohm: float
     effective_source_v: float
     time_constant_seconds: float
     settling_factor: float
@@ -207,6 +216,9 @@ class MeasurementPoint:
     y_v: float
     source_v: float
     source_phase_deg: float
+    external_series_ohm: float
+    source_series_ohm: float
+    total_series_ohm: float
     z_complex: complex
 
     @property
@@ -548,7 +560,8 @@ class SR860ImpedanceApp:
         self.points_var = tk.StringVar(value="60")
         self.log_sweep_var = tk.BooleanVar(value=True)
 
-        self.series_resistor_var = tk.StringVar(value="2200")
+        self.series_resistor_var = tk.StringVar(value="220")
+        self.source_series_var = tk.StringVar(value="50 Ω")
         self.output_amplitude_var = tk.StringVar(value="1.0")
         self.effective_source_var = tk.StringVar(value="1.0")
         self.output_connection_var = tk.StringVar(value="Single-ended")
@@ -678,28 +691,29 @@ class SR860ImpedanceApp:
         ttk.Checkbutton(frame, text="Barrido logarítmico", variable=self.log_sweep_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
         self._add_labeled_entry(frame, 7, "Resistencia serie Rs [Ω]", self.series_resistor_var)
-        self._add_labeled_entry(frame, 8, "Amplitud SR860 [V]", self.output_amplitude_var)
-        self._add_labeled_combo(frame, 9, "Uso de salida", self.output_connection_var, list(OUTPUT_CONNECTION_OPTIONS))
-        self._add_labeled_combo(frame, 10, "Carga estimada", self.output_load_var, list(OUTPUT_LOAD_OPTIONS))
-        self._add_labeled_entry(frame, 11, "Amplitud efectiva en DUT [V]", self.effective_source_var)
-        self._add_labeled_entry(frame, 12, "PHAS referencia [deg]", self.phase_var)
-        self._add_labeled_entry(frame, 13, "Offset DC [V]", self.offset_var)
-        self._add_labeled_entry(frame, 14, "Factor de asentamiento", self.settling_factor_var)
+        self._add_labeled_combo(frame, 8, "Z serie fuente/equipo", self.source_series_var, list(SOURCE_SERIES_OPTIONS))
+        self._add_labeled_entry(frame, 9, "Amplitud SR860 [V]", self.output_amplitude_var)
+        self._add_labeled_combo(frame, 10, "Uso de salida", self.output_connection_var, list(OUTPUT_CONNECTION_OPTIONS))
+        self._add_labeled_combo(frame, 11, "Carga estimada", self.output_load_var, list(OUTPUT_LOAD_OPTIONS))
+        self._add_labeled_entry(frame, 12, "Amplitud efectiva en DUT [V]", self.effective_source_var)
+        self._add_labeled_entry(frame, 13, "PHAS referencia [deg]", self.phase_var)
+        self._add_labeled_entry(frame, 14, "Offset DC [V]", self.offset_var)
+        self._add_labeled_entry(frame, 15, "Factor de asentamiento", self.settling_factor_var)
 
-        self._add_labeled_combo(frame, 15, "Time constant", self.time_constant_var, list(TIME_CONSTANT_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 16, "Pendiente de filtro", self.filter_slope_var, list(FILTER_SLOPE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 17, "Fuente de referencia", self.reference_source_var, list(REFERENCE_SOURCE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 18, "Modo de entrada", self.input_mode_var, list(INPUT_MODE_OPTIONS.keys()))
-        self._add_labeled_combo(frame, 19, "Rango de entrada", self.input_range_var, list(INPUT_RANGE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 16, "Time constant", self.time_constant_var, list(TIME_CONSTANT_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 17, "Pendiente de filtro", self.filter_slope_var, list(FILTER_SLOPE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 18, "Fuente de referencia", self.reference_source_var, list(REFERENCE_SOURCE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 19, "Modo de entrada", self.input_mode_var, list(INPUT_MODE_OPTIONS.keys()))
+        self._add_labeled_combo(frame, 20, "Rango de entrada", self.input_range_var, list(INPUT_RANGE_OPTIONS.keys()))
 
-        ttk.Checkbutton(frame, text="Acoplamiento DC", variable=self.coupling_dc_var).grid(row=20, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(frame, text="Blindaje a tierra", variable=self.shield_ground_var).grid(row=21, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(frame, text="Sync filter", variable=self.sync_filter_var).grid(row=22, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="Acoplamiento DC", variable=self.coupling_dc_var).grid(row=21, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(frame, text="Blindaje a tierra", variable=self.shield_ground_var).grid(row=22, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(frame, text="Sync filter", variable=self.sync_filter_var).grid(row=23, column=0, columnspan=2, sticky="w")
 
-        ttk.Button(frame, text="Leer amplitud del SR860", style="Soft.TButton", command=self.load_source_from_instrument).grid(row=23, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Button(frame, text="Leer config del SR860", style="Soft.TButton", command=self.load_setup_from_instrument).grid(row=24, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(frame, text="Reestimar amplitud efectiva", style="Soft.TButton", command=self.refresh_effective_source_from_model).grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(frame, text="Aplicar setup al equipo", style="Accent.TButton", command=self.apply_setup_to_instrument).grid(row=26, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(frame, text="Leer amplitud del SR860", style="Soft.TButton", command=self.load_source_from_instrument).grid(row=24, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(frame, text="Leer config del SR860", style="Soft.TButton", command=self.load_setup_from_instrument).grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(frame, text="Reestimar amplitud efectiva", style="Soft.TButton", command=self.refresh_effective_source_from_model).grid(row=26, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(frame, text="Aplicar setup al equipo", style="Accent.TButton", command=self.apply_setup_to_instrument).grid(row=27, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     def _build_actions_panel(self) -> None:
         frame = ttk.LabelFrame(self.sidebar, text="Medición y Exportación", style="Section.TLabelframe", padding=12)
@@ -987,6 +1001,7 @@ class SR860ImpedanceApp:
         stop_freq = float(self.stop_freq_var.get())
         points = int(self.points_var.get())
         series_resistor = float(self.series_resistor_var.get())
+        source_series = parse_ohms_label(self.source_series_var.get())
         effective_source = float(self.effective_source_var.get())
         output_amplitude = float(self.output_amplitude_var.get())
         phase_deg = float(self.phase_var.get())
@@ -1002,6 +1017,8 @@ class SR860ImpedanceApp:
             raise ValueError("El barrido necesita al menos 2 puntos.")
         if series_resistor <= 0:
             raise ValueError("Rs debe ser mayor a cero.")
+        if source_series < 0:
+            raise ValueError("La impedancia serie de fuente/equipo no puede ser negativa.")
         if effective_source <= 0:
             raise ValueError("La amplitud efectiva debe ser mayor a cero.")
         if tc_label not in TIME_CONSTANT_SECONDS:
@@ -1016,6 +1033,7 @@ class SR860ImpedanceApp:
             points=points,
             logarithmic=self.log_sweep_var.get(),
             series_resistor_ohm=series_resistor,
+            source_series_ohm=source_series,
             effective_source_v=effective_source,
             time_constant_seconds=TIME_CONSTANT_SECONDS[tc_label],
             settling_factor=settling_factor,
@@ -1174,13 +1192,17 @@ class SR860ImpedanceApp:
     def _compute_measurement_point(self, config: SweepConfig, freq_hz: float, x_v: float, y_v: float) -> MeasurementPoint:
         measured_v = complex(x_v, y_v)
         source_v = source_phasor_from_lockin_reference(config.effective_source_v, config.output_phase_deg)
-        z_complex = impedance_from_series_divider(config.series_resistor_ohm, source_v, measured_v)
+        total_series_ohm = config.series_resistor_ohm + config.source_series_ohm
+        z_complex = impedance_from_series_divider(total_series_ohm, source_v, measured_v)
         return MeasurementPoint(
             frequency_hz=freq_hz,
             x_v=x_v,
             y_v=y_v,
             source_v=config.effective_source_v,
             source_phase_deg=-config.output_phase_deg,
+            external_series_ohm=config.series_resistor_ohm,
+            source_series_ohm=config.source_series_ohm,
+            total_series_ohm=total_series_ohm,
             z_complex=z_complex,
         )
 
@@ -1319,6 +1341,8 @@ class SR860ImpedanceApp:
                 "points": self.points_var.get(),
                 "logarithmic": self.log_sweep_var.get(),
                 "series_resistor_ohm": self.series_resistor_var.get(),
+                "source_series_ohm": self.source_series_var.get(),
+                "total_series_note": "La medición usa Rs física externa + Z serie fuente/equipo.",
                 "output_amplitude_v": self.output_amplitude_var.get(),
                 "effective_source_v": self.effective_source_var.get(),
                 "output_connection": self.output_connection_var.get(),
@@ -1347,6 +1371,9 @@ class SR860ImpedanceApp:
                     "y_v": point.y_v,
                     "source_v": point.source_v,
                     "source_phase_deg": point.source_phase_deg,
+                    "external_series_ohm": point.external_series_ohm,
+                    "source_series_ohm": point.source_series_ohm,
+                    "total_series_ohm": point.total_series_ohm,
                     "real_impedance_ohm": point.r_ohm,
                     "r_ohm": point.r_ohm,
                     "x_ohm": point.x_ohm,
@@ -1401,6 +1428,9 @@ class SR860ImpedanceApp:
                     "y_v",
                     "source_v",
                     "source_phase_deg",
+                    "external_series_ohm",
+                    "source_series_ohm",
+                    "total_series_ohm",
                     "real_impedance_ohm",
                     "r_ohm",
                     "x_ohm",
@@ -1418,6 +1448,9 @@ class SR860ImpedanceApp:
                         point.y_v,
                         point.source_v,
                         point.source_phase_deg,
+                        point.external_series_ohm,
+                        point.source_series_ohm,
+                        point.total_series_ohm,
                         point.r_ohm,
                         point.r_ohm,
                         point.x_ohm,
