@@ -1,14 +1,14 @@
 # SR860 Impedance Workbench
 
-Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visualizar `R`, `C`, `|Z|` y `L` contra frecuencia, exportar gráficas en `SVG` y controlar el setup del instrumento desde una GUI.
+Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visualizar `Re(Z)`, `C`, `|Z|` y `L` contra frecuencia, exportar gráficas en `SVG` y controlar el setup del instrumento desde una GUI.
 
 ## Funciones principales
 
 - Diagnóstico de conexión con lectura de `*IDN?`, `FREQ?`, `SLVL?` y `SNAP? X,Y`.
 - Medición única para validar cableado y respuesta antes de un barrido completo.
 - Barrido de impedancia usando resistencia serie conocida.
-- Vista automática para resistencias con `R`, `Xz`, `|Z|` y fase contra frecuencia.
-- Vista general con `R`, `C`, `|Z|` y `L` contra frecuencia.
+- Vista automática para resistencias con `Re(Z)`, `Xz`, `|Z|` y fase contra frecuencia.
+- Vista general con `Re(Z)`, `C`, `|Z|` y `L` contra frecuencia.
 - Exportación de CSV, SVG seleccionables y sesión completa en JSON.
 - Panel de configuración con scroll para pantallas pequeñas.
 
@@ -17,19 +17,27 @@ Aplicación en Python para medir impedancia con un lock-in SRS SR860/SR865, visu
 La app asume un montaje de divisor serie con resistencia conocida `Rs` y DUT:
 
 ```text
+Vdut = X + jY
+Vsource = Veff * exp(-j*PHAS)
 Zdut = Rs * Vdut / (Vsource - Vdut)
 ```
 
-Desde la impedancia compleja `Z = R + jXz`, calcula:
+`X` y `Y` vienen de `SNAP? X,Y` del SR860. La fase `PHAS` se incluye porque el instrumento rota la referencia de los detectores X/Y; si `PHAS = 0`, la ecuación se reduce al divisor serie real usado normalmente.
+
+Desde la impedancia compleja `Z = Re(Z) + jXz`, calcula:
 
 ```text
-R = real(Z)
+Re(Z) = real(Z)
 |Z| = abs(Z)
 Cserie = -1 / (2*pi*f*Xz), sólo si Xz < 0
 Lserie = Xz / (2*pi*f), sólo si Xz > 0
 ```
 
 `C` y `L` son equivalentes serie derivados de la reactancia. Para una resistencia ideal deberían ser inexistentes o poco estables, porque `Xz` se acerca a cero.
+
+Antes de medir, la app fuerza detección en fundamental (`HARM 1`) y apaga offset, ratio y expand en `X/Y/R` para que `SNAP? X,Y` sea una lectura RMS cruda del fasor de entrada.
+
+La amplitud efectiva usa el modelo oficial de SINE OUT del SR860: salida diferencial, 50 Ω por BNC, amplitud RMS dependiente de si se usa single-ended/differential y carga High-Z/50 Ω. Referencia: manual oficial de Stanford Research Systems, `SR860m.pdf` (`https://thinksrs.com/downloads/pdfs/manuals/SR860m.pdf`).
 
 ## Estado del proyecto
 

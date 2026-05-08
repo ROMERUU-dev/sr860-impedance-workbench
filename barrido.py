@@ -129,7 +129,7 @@ DUT_TYPE_OPTIONS = ("Resistencia", "Capacitor", "Inductor", "Impedancia mixta")
 PLOT_MODE_OPTIONS = ("Auto", "R/X/Z/Fase", "R/C/Z/L")
 EXPORT_CHART_OPTIONS = {
     "dashboard": "Panel 2x2 actual",
-    "r": "R vs frecuencia",
+    "r": "Re(Z) vs frecuencia",
     "xz": "Xz vs frecuencia",
     "c": "C vs frecuencia",
     "z": "|Z| vs frecuencia",
@@ -144,6 +144,31 @@ def resource_path(relative_path: str) -> Path:
     """
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base_path / relative_path
+
+
+def source_phasor_from_lockin_reference(magnitude_v: float, reference_phase_deg: float) -> complex:
+    """
+    Devuelve el fasor RMS de la fuente en el marco X/Y reportado por el SR860.
+
+    `PHAS` rota la referencia interna usada por los detectores X/Y. La salida
+    SINE OUT sigue al oscilador, por lo que en el marco del lock-in la fuente
+    queda con fase `-PHAS`.
+    """
+    phase_rad = math.radians(-reference_phase_deg)
+    return magnitude_v * complex(math.cos(phase_rad), math.sin(phase_rad))
+
+
+def impedance_from_series_divider(series_resistor_ohm: float, source_v: complex, dut_v: complex) -> complex:
+    """
+    Calcula Z_DUT para el divisor serie Rs + DUT usando fasores RMS complejos.
+    """
+    denominator = source_v - dut_v
+    if abs(denominator) < 1e-18:
+        raise ZeroDivisionError(
+            "La amplitud medida es prácticamente igual a la amplitud de excitación. "
+            "No es posible calcular Z con estabilidad numérica."
+        )
+    return series_resistor_ohm * dut_v / denominator
 
 
 @dataclass
@@ -180,6 +205,7 @@ class MeasurementPoint:
     x_v: float
     y_v: float
     source_v: float
+    source_phase_deg: float
     z_complex: complex
 
     @property
@@ -227,12 +253,15 @@ class SR860Controller:
         self.raw_handle = None
         self.transport = "visa"
 
-    def list_resources(self) -> tuple[str, ...]:
+    def list_resources(self, refresh_session: bool = True) -> tuple[str, ...]:
+        if refresh_session:
+            self.close()
+
         visa_resources: tuple[str, ...] = ()
         try:
             if self.rm is None:
                 self.rm = pyvisa.ResourceManager()
-            visa_resources = self.rm.list_resources()
+            visa_resources = self.rm.list_resources("?*")
         except Exception:
             visa_resources = ()
 
@@ -240,14 +269,14 @@ class SR860Controller:
         return tuple(dict.fromkeys((*visa_resources, *raw_resources)))
 
     def connect(self, resource_name: str) -> str:
+        self.close()
+
         if resource_name.startswith("/dev/usbtmc"):
-            self.close()
             self.raw_handle = open(resource_name, "r+b", buffering=0)
             self.transport = "raw-usbtmc"
             return self.query("*IDN?")
 
-        if self.rm is None:
-            self.rm = pyvisa.ResourceManager()
+        self.rm = pyvisa.ResourceManager()
         self.transport = "visa"
         self.inst = self.rm.open_resource(resource_name)
         self.inst.timeout = 10000
@@ -257,14 +286,24 @@ class SR860Controller:
 
     def close(self) -> None:
         if self.inst is not None:
-            self.inst.close()
+            try:
+                self.inst.close()
+            except Exception:
+                pass
             self.inst = None
         if self.raw_handle is not None:
-            self.raw_handle.close()
+            try:
+                self.raw_handle.close()
+            except Exception:
+                pass
             self.raw_handle = None
         if self.rm is not None:
-            self.rm.close()
+            try:
+                self.rm.close()
+            except Exception:
+                pass
             self.rm = None
+        self.transport = "visa"
 
     def require_connection(self) -> None:
         if self.inst is None and self.raw_handle is None:
@@ -272,17 +311,25 @@ class SR860Controller:
 
     def write(self, command: str) -> None:
         self.require_connection()
-        if self.transport == "raw-usbtmc":
-            self._raw_write(command)
-            return
-        self.inst.write(command)
+        try:
+            if self.transport == "raw-usbtmc":
+                self._raw_write(command)
+                return
+            self.inst.write(command)
+        except Exception as exc:
+            self.close()
+            raise RuntimeError(f"Se perdió la comunicación con el SR860 al enviar {command!r}.") from exc
 
     def query(self, command: str) -> str:
         self.require_connection()
-        if self.transport == "raw-usbtmc":
-            self._raw_write(command)
-            return self._raw_readline()
-        return self.inst.query(command).strip()
+        try:
+            if self.transport == "raw-usbtmc":
+                self._raw_write(command)
+                return self._raw_readline()
+            return self.inst.query(command).strip()
+        except Exception as exc:
+            self.close()
+            raise RuntimeError(f"Se perdió la comunicación con el SR860 al consultar {command!r}.") from exc
 
     def _raw_write(self, command: str) -> None:
         if self.raw_handle is None:
@@ -324,7 +371,9 @@ class SR860Controller:
 
     def apply_setup(self, config: SweepConfig) -> None:
         self.write(f"RSRC {REFERENCE_SOURCE_OPTIONS[config.reference_source_label]}")
+        self.write("HARM 1")
         self.write(f"IVMD {INPUT_MODE_OPTIONS[config.input_mode_label]}")
+        self._disable_display_math_for_raw_xy()
 
         if config.input_mode_label == "Current 1 MΩ":
             self.write("ICUR 0")
@@ -341,6 +390,14 @@ class SR860Controller:
         self.write(f"OFLT {TIME_CONSTANT_OPTIONS[config.time_constant_label]}")
         self.write(f"OFSL {FILTER_SLOPE_OPTIONS[config.filter_slope_label]}")
         self.write(f"SYNC {1 if config.sync_filter else 0}")
+
+    def _disable_display_math_for_raw_xy(self) -> None:
+        # Offset/ratio de X/Y pueden modificar consultas remotas; la impedancia
+        # necesita los fasores RMS crudos referidos a la entrada.
+        for channel in ("X", "Y", "R"):
+            self.write(f"COFA {channel}, OFF")
+            self.write(f"CRAT {channel}, OFF")
+            self.write(f"CEXP {channel}, OFF")
 
     def read_effective_source_guess(self) -> float:
         # `SLVL?` devuelve la amplitud configurada en el instrumento.
@@ -553,7 +610,7 @@ class SR860ImpedanceApp:
         ttk.Label(title_frame, text="SR860 Impedance Workbench", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             title_frame,
-            text="Barrido de DUT con GUI, setup remoto, cálculo de Z/R/C/L y exportación SVG.",
+            text="Barrido de DUT con GUI, setup remoto, cálculo de Z y Re(Z) para caracterización.",
             style="Muted.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -616,7 +673,7 @@ class SR860ImpedanceApp:
         self._add_labeled_combo(frame, 9, "Uso de salida", self.output_connection_var, list(OUTPUT_CONNECTION_OPTIONS))
         self._add_labeled_combo(frame, 10, "Carga estimada", self.output_load_var, list(OUTPUT_LOAD_OPTIONS))
         self._add_labeled_entry(frame, 11, "Amplitud efectiva en DUT [V]", self.effective_source_var)
-        self._add_labeled_entry(frame, 12, "Fase [deg]", self.phase_var)
+        self._add_labeled_entry(frame, 12, "PHAS referencia [deg]", self.phase_var)
         self._add_labeled_entry(frame, 13, "Offset DC [V]", self.offset_var)
         self._add_labeled_entry(frame, 14, "Factor de asentamiento", self.settling_factor_var)
 
@@ -691,7 +748,7 @@ class SR860ImpedanceApp:
             "f": "Freq [Hz]",
             "x": "X [V]",
             "y": "Y [V]",
-            "r": "R [Ω]",
+            "r": "Re(Z) [Ω]",
             "reactance": "Xz [Ω]",
             "z": "|Z| [Ω]",
             "phase": "Fase [deg]",
@@ -740,32 +797,34 @@ class SR860ImpedanceApp:
     def _current_plot_labels(self) -> list[tuple[str, str]]:
         if self._current_plot_mode() == "R/X/Z/Fase":
             return [
-                ("R vs Frecuencia", "R [Ω]"),
+                ("Re(Z) vs Frecuencia", "Re(Z) [Ω]"),
                 ("Xz vs Frecuencia", "Xz [Ω]"),
                 ("|Z| vs Frecuencia", "|Z| [Ω]"),
                 ("Fase de Z vs Frecuencia", "Fase [deg]"),
             ]
         return [
-            ("R vs Frecuencia", "R [Ω]"),
+            ("Re(Z) vs Frecuencia", "Re(Z) [Ω]"),
             ("C vs Frecuencia", "C"),
             ("|Z| vs Frecuencia", "|Z| [Ω]"),
             ("L vs Frecuencia", "L"),
         ]
 
     def refresh_resources(self) -> None:
+        previous_resource = self.resource_var.get().strip()
         try:
-            resources = self.controller.list_resources()
+            resources = self.controller.list_resources(refresh_session=True)
         except Exception as exc:
             self.status_var.set(f"No se pudieron listar recursos VISA: {exc}")
             return
 
         self.resource_combo["values"] = resources
+        self.idn_var.set("Sin conexión")
         if resources:
-            self.resource_var.set(resources[0])
-            self.status_var.set(f"Se encontraron {len(resources)} recurso(s) VISA.")
+            self.resource_var.set(previous_resource if previous_resource in resources else resources[0])
+            self.status_var.set(f"Se encontraron {len(resources)} recurso(s). Sesión de conexión reiniciada.")
         else:
             self.resource_var.set("")
-            self.status_var.set("No se detectaron recursos VISA.")
+            self.status_var.set("No se detectaron recursos. Conecta el SR860 y pulsa Actualizar.")
 
     def connect_instrument(self) -> None:
         resource = self.resource_var.get().strip()
@@ -800,10 +859,13 @@ class SR860ImpedanceApp:
             return
 
         try:
-            if self.controller.inst is None and self.controller.raw_handle is None:
+            try:
+                if self.controller.inst is None and self.controller.raw_handle is None:
+                    idn = self.controller.connect(resource)
+                else:
+                    idn = self.controller.query("*IDN?")
+            except Exception:
                 idn = self.controller.connect(resource)
-            else:
-                idn = self.controller.query("*IDN?")
 
             freq = self.controller.query("FREQ?")
             amplitude = self.controller.query("SLVL?")
@@ -1063,7 +1125,7 @@ class SR860ImpedanceApp:
         self._append_table_row(point)
         self._refresh_plots()
         self.status_var.set(
-            f"Medición única: f={point.frequency_hz:.3f} Hz | R={point.r_ohm:.3f} Ω | "
+            f"Medición única: f={point.frequency_hz:.3f} Hz | Re(Z)={point.r_ohm:.3f} Ω | "
             f"Xz={point.x_ohm:.3f} Ω | fase={point.phase_deg:.3f}°"
         )
         self.progress_var.set(f"Se capturaron {len(self.measurements)} punto(s).")
@@ -1102,20 +1164,14 @@ class SR860ImpedanceApp:
 
     def _compute_measurement_point(self, config: SweepConfig, freq_hz: float, x_v: float, y_v: float) -> MeasurementPoint:
         measured_v = complex(x_v, y_v)
-        denominator = config.effective_source_v - measured_v
-
-        if abs(denominator) < 1e-18:
-            raise ZeroDivisionError(
-                "La amplitud medida es prácticamente igual a la amplitud de excitación. "
-                "No es posible calcular Z con estabilidad numérica."
-            )
-
-        z_complex = config.series_resistor_ohm * measured_v / denominator
+        source_v = source_phasor_from_lockin_reference(config.effective_source_v, config.output_phase_deg)
+        z_complex = impedance_from_series_divider(config.series_resistor_ohm, source_v, measured_v)
         return MeasurementPoint(
             frequency_hz=freq_hz,
             x_v=x_v,
             y_v=y_v,
             source_v=config.effective_source_v,
+            source_phase_deg=-config.output_phase_deg,
             z_complex=z_complex,
         )
 
@@ -1132,7 +1188,7 @@ class SR860ImpedanceApp:
                 self._append_table_row(payload)
                 self._refresh_plots()
                 self.status_var.set(
-                    f"Último punto: {payload.frequency_hz:.3f} Hz | R={payload.r_ohm:.3f} Ω | "
+                    f"Último punto: {payload.frequency_hz:.3f} Hz | Re(Z)={payload.r_ohm:.3f} Ω | "
                     f"|Z|={payload.z_abs_ohm:.3f} Ω"
                 )
             elif event == "progress":
@@ -1190,14 +1246,14 @@ class SR860ImpedanceApp:
 
         if self._current_plot_mode() == "R/X/Z/Fase":
             plot_specs = [
-                (self.axes[0, 0], r_values, "R vs Frecuencia", "R [Ω]", self.colors["line_1"]),
+                (self.axes[0, 0], r_values, "Re(Z) vs Frecuencia", "Re(Z) [Ω]", self.colors["line_1"]),
                 (self.axes[0, 1], x_values, "Xz vs Frecuencia", "Xz [Ω]", self.colors["line_2"]),
                 (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
                 (self.axes[1, 1], phase_values, "Fase de Z vs Frecuencia", "Fase [deg]", self.colors["line_4"]),
             ]
         else:
             plot_specs = [
-                (self.axes[0, 0], r_values, "R vs Frecuencia", "R [Ω]", self.colors["line_1"]),
+                (self.axes[0, 0], r_values, "Re(Z) vs Frecuencia", "Re(Z) [Ω]", self.colors["line_1"]),
                 (self.axes[0, 1], c_scaled, "C vs Frecuencia", f"C [{c_unit}]", self.colors["line_2"]),
                 (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
                 (self.axes[1, 1], l_scaled, "L vs Frecuencia", f"L [{l_unit}]", self.colors["line_4"]),
@@ -1281,6 +1337,8 @@ class SR860ImpedanceApp:
                     "x_v": point.x_v,
                     "y_v": point.y_v,
                     "source_v": point.source_v,
+                    "source_phase_deg": point.source_phase_deg,
+                    "real_impedance_ohm": point.r_ohm,
                     "r_ohm": point.r_ohm,
                     "x_ohm": point.x_ohm,
                     "z_abs_ohm": point.z_abs_ohm,
@@ -1333,6 +1391,8 @@ class SR860ImpedanceApp:
                     "x_v",
                     "y_v",
                     "source_v",
+                    "source_phase_deg",
+                    "real_impedance_ohm",
                     "r_ohm",
                     "x_ohm",
                     "z_abs_ohm",
@@ -1348,6 +1408,8 @@ class SR860ImpedanceApp:
                         point.x_v,
                         point.y_v,
                         point.source_v,
+                        point.source_phase_deg,
+                        point.r_ohm,
                         point.r_ohm,
                         point.x_ohm,
                         point.z_abs_ohm,
@@ -1364,8 +1426,8 @@ class SR860ImpedanceApp:
         return {
             "r": (
                 "r_vs_freq.svg",
-                "R vs Frecuencia",
-                "R [Ω]",
+                "Re(Z) vs Frecuencia",
+                "Re(Z) [Ω]",
                 freqs,
                 np.array([p.r_ohm for p in self.measurements], dtype=float),
                 self.colors["line_1"],
