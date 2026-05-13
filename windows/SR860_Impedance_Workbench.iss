@@ -1,5 +1,5 @@
 #define MyAppName "SR860 Impedance Workbench"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "ROMERUU-dev"
 #define MyAppURL "https://github.com/ROMERUU-dev/sr860-impedance-workbench"
 #define MyAppExeName "SR860_Impedance_Workbench.exe"
@@ -18,7 +18,7 @@ DisableProgramGroupPage=yes
 LicenseFile=
 PrivilegesRequired=lowest
 OutputDir=dist_installer
-OutputBaseFilename=SR860_Impedance_Workbench_Setup_v0.1.0
+OutputBaseFilename=SR860_Impedance_Workbench_Setup_v0.1.1
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
