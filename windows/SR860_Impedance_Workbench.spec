@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-project_root = Path.cwd()
+project_root = Path(SPECPATH).resolve().parent
 
 datas = [
     (str(project_root / "assets" / "srs-1.png"), "assets"),
@@ -16,7 +16,7 @@ hiddenimports = [
 ]
 
 a = Analysis(
-    ["barrido.py"],
+    [str(project_root / "barrido.py")],
     pathex=[str(project_root)],
     binaries=[],
     datas=datas,

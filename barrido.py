@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import csv
 import errno
-import fcntl
 import json
 import math
 import os
@@ -36,6 +35,11 @@ from tkinter import filedialog, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 # Mapeo simple y directo entre los nombres visibles en la GUI
@@ -273,6 +277,33 @@ def format_si(value: float, unit: str) -> str:
     return f"{value:.4g} {unit}"
 
 
+def scale_series_to_si(values: np.ndarray, base_unit: str) -> tuple[np.ndarray, str]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return values, base_unit
+
+    peak = float(np.max(np.abs(finite)))
+    if peak == 0.0:
+        return values, base_unit
+
+    scales = [
+        (1e12, f"p{base_unit}"),
+        (1e9, f"n{base_unit}"),
+        (1e6, f"\u00b5{base_unit}"),
+        (1e3, f"m{base_unit}"),
+        (1.0, base_unit),
+        (1e-3, f"k{base_unit}"),
+        (1e-6, f"M{base_unit}"),
+        (1e-9, f"G{base_unit}"),
+    ]
+
+    for factor, unit in scales:
+        scaled_peak = peak * factor
+        if 0.1 <= scaled_peak < 1000:
+            return values * factor, unit
+    return values, base_unit
+
+
 def _finite_median(values: list[float]) -> float:
     finite = np.array([value for value in values if math.isfinite(value)], dtype=float)
     if finite.size == 0:
@@ -426,6 +457,8 @@ class SR860Controller:
         self.close()
 
         if resource_name.startswith("/dev/usbtmc"):
+            if fcntl is None:
+                raise RuntimeError("El acceso USBTMC directo sólo está disponible en Linux. En Windows usa un recurso VISA.")
             self.raw_handle = open(resource_name, "r+b", buffering=0)
             flags = fcntl.fcntl(self.raw_handle.fileno(), fcntl.F_GETFL)
             fcntl.fcntl(self.raw_handle.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
@@ -914,12 +947,12 @@ class SR860ImpedanceApp:
             "f": "Freq [Hz]",
             "x": "X [V]",
             "y": "Y [V]",
-            "r": "Re(Z) [Ω]",
-            "reactance": "Xz [Ω]",
-            "z": "|Z| [Ω]",
+            "r": "Re(Z)",
+            "reactance": "Xz",
+            "z": "|Z|",
             "phase": "Fase [deg]",
-            "c": "C [F]",
-            "l": "L [H]",
+            "c": "C",
+            "l": "L",
         }
         widths = {"f": 105, "x": 100, "y": 100, "r": 100, "reactance": 100, "z": 100, "phase": 95, "c": 120, "l": 120}
         for key in columns:
@@ -970,9 +1003,9 @@ class SR860ImpedanceApp:
             ]
         return [
             ("Re(Z) vs Frecuencia", "Re(Z) [Ω]"),
-            ("C vs Frecuencia", "C"),
+            ("C vs Frecuencia", "C [F]"),
             ("|Z| vs Frecuencia", "|Z| [Ω]"),
-            ("L vs Frecuencia", "L"),
+            ("L vs Frecuencia", "L [H]"),
         ]
 
     def refresh_resources(self) -> None:
@@ -1392,12 +1425,12 @@ class SR860ImpedanceApp:
             f"{point.frequency_hz:.6g}",
             f"{point.x_v:.6e}",
             f"{point.y_v:.6e}",
-            f"{point.r_ohm:.6e}",
-            f"{point.x_ohm:.6e}",
-            f"{point.z_abs_ohm:.6e}",
+            format_si(point.r_ohm, "Ω"),
+            format_si(point.x_ohm, "Ω"),
+            format_si(point.z_abs_ohm, "Ω"),
             f"{point.phase_deg:.6e}",
-            f"{point.capacitance_f:.6e}" if math.isfinite(point.capacitance_f) else "nan",
-            f"{point.inductance_h:.6e}" if math.isfinite(point.inductance_h) else "nan",
+            format_si(point.capacitance_f, "F"),
+            format_si(point.inductance_h, "H"),
         )
         self.table.insert("", "end", values=values)
         children = self.table.get_children()
@@ -1430,21 +1463,24 @@ class SR860ImpedanceApp:
         z_values = np.array([p.z_abs_ohm for p in self.measurements], dtype=float)
         l_values = np.array([p.inductance_h for p in self.measurements], dtype=float)
 
-        c_scaled, c_unit = self._auto_scale_series(c_values, "F")
-        l_scaled, l_unit = self._auto_scale_series(l_values, "H")
+        r_scaled, r_unit = scale_series_to_si(r_values, "Ω")
+        x_scaled, x_unit = scale_series_to_si(x_values, "Ω")
+        z_scaled, z_unit = scale_series_to_si(z_values, "Ω")
+        c_scaled, c_unit = scale_series_to_si(c_values, "F")
+        l_scaled, l_unit = scale_series_to_si(l_values, "H")
 
         if self._current_plot_mode() == "R/X/Z/Fase":
             plot_specs = [
-                (self.axes[0, 0], r_values, "Re(Z) vs Frecuencia", "Re(Z) [Ω]", self.colors["line_1"]),
-                (self.axes[0, 1], x_values, "Xz vs Frecuencia", "Xz [Ω]", self.colors["line_2"]),
-                (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
+                (self.axes[0, 0], r_scaled, "Re(Z) vs Frecuencia", f"Re(Z) [{r_unit}]", self.colors["line_1"]),
+                (self.axes[0, 1], x_scaled, "Xz vs Frecuencia", f"Xz [{x_unit}]", self.colors["line_2"]),
+                (self.axes[1, 0], z_scaled, "|Z| vs Frecuencia", f"|Z| [{z_unit}]", self.colors["line_3"]),
                 (self.axes[1, 1], phase_values, "Fase de Z vs Frecuencia", "Fase [deg]", self.colors["line_4"]),
             ]
         else:
             plot_specs = [
-                (self.axes[0, 0], r_values, "Re(Z) vs Frecuencia", "Re(Z) [Ω]", self.colors["line_1"]),
+                (self.axes[0, 0], r_scaled, "Re(Z) vs Frecuencia", f"Re(Z) [{r_unit}]", self.colors["line_1"]),
                 (self.axes[0, 1], c_scaled, "C vs Frecuencia", f"C [{c_unit}]", self.colors["line_2"]),
-                (self.axes[1, 0], z_values, "|Z| vs Frecuencia", "|Z| [Ω]", self.colors["line_3"]),
+                (self.axes[1, 0], z_scaled, "|Z| vs Frecuencia", f"|Z| [{z_unit}]", self.colors["line_3"]),
                 (self.axes[1, 1], l_scaled, "L vs Frecuencia", f"L [{l_unit}]", self.colors["line_4"]),
             ]
 
@@ -1465,26 +1501,6 @@ class SR860ImpedanceApp:
                 ax.plot(freqs[valid], values[valid], color=color, linewidth=2.2)
 
         self.canvas.draw_idle()
-
-    def _auto_scale_series(self, values: np.ndarray, base_unit: str) -> tuple[np.ndarray, str]:
-        finite = values[np.isfinite(values)]
-        if finite.size == 0:
-            return values, base_unit
-
-        peak = float(np.max(np.abs(finite)))
-        scales = [
-            (1e9, f"n{base_unit}"),
-            (1e6, f"µ{base_unit}"),
-            (1e3, f"m{base_unit}"),
-            (1.0, base_unit),
-            (1e-3, f"k{base_unit}"),
-        ]
-
-        for factor, unit in scales:
-            scaled_peak = peak * factor
-            if 0.1 <= scaled_peak < 1000:
-                return values * factor, unit
-        return values, base_unit
 
     def _session_payload(self) -> dict[str, object]:
         return {
@@ -1624,37 +1640,49 @@ class SR860ImpedanceApp:
 
     def _svg_chart_payloads(self) -> dict[str, tuple[str, str, str, np.ndarray, np.ndarray, str]]:
         freqs = np.array([p.frequency_hz for p in self.measurements], dtype=float)
+        r_values = np.array([p.r_ohm for p in self.measurements], dtype=float)
+        x_values = np.array([p.x_ohm for p in self.measurements], dtype=float)
+        c_values = np.array([p.capacitance_f for p in self.measurements], dtype=float)
+        z_values = np.array([p.z_abs_ohm for p in self.measurements], dtype=float)
+        l_values = np.array([p.inductance_h for p in self.measurements], dtype=float)
+
+        r_scaled, r_unit = scale_series_to_si(r_values, "Ω")
+        x_scaled, x_unit = scale_series_to_si(x_values, "Ω")
+        c_scaled, c_unit = scale_series_to_si(c_values, "F")
+        z_scaled, z_unit = scale_series_to_si(z_values, "Ω")
+        l_scaled, l_unit = scale_series_to_si(l_values, "H")
+
         return {
             "r": (
                 "r_vs_freq.svg",
                 "Re(Z) vs Frecuencia",
-                "Re(Z) [Ω]",
+                f"Re(Z) [{r_unit}]",
                 freqs,
-                np.array([p.r_ohm for p in self.measurements], dtype=float),
+                r_scaled,
                 self.colors["line_1"],
             ),
             "xz": (
                 "xz_vs_freq.svg",
                 "Xz vs Frecuencia",
-                "Xz [Ω]",
+                f"Xz [{x_unit}]",
                 freqs,
-                np.array([p.x_ohm for p in self.measurements], dtype=float),
+                x_scaled,
                 self.colors["line_2"],
             ),
             "c": (
                 "c_vs_freq.svg",
                 "C vs Frecuencia",
-                "C [F]",
+                f"C [{c_unit}]",
                 freqs,
-                np.array([p.capacitance_f for p in self.measurements], dtype=float),
+                c_scaled,
                 self.colors["line_2"],
             ),
             "z": (
                 "z_vs_freq.svg",
                 "|Z| vs Frecuencia",
-                "|Z| [Ω]",
+                f"|Z| [{z_unit}]",
                 freqs,
-                np.array([p.z_abs_ohm for p in self.measurements], dtype=float),
+                z_scaled,
                 self.colors["line_3"],
             ),
             "phase": (
@@ -1668,9 +1696,9 @@ class SR860ImpedanceApp:
             "l": (
                 "l_vs_freq.svg",
                 "L vs Frecuencia",
-                "L [H]",
+                f"L [{l_unit}]",
                 freqs,
-                np.array([p.inductance_h for p in self.measurements], dtype=float),
+                l_scaled,
                 self.colors["line_4"],
             ),
         }

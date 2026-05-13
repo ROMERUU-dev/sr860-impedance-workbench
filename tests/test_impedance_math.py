@@ -1,11 +1,14 @@
 import math
 import unittest
 
+import numpy as np
+
 from barrido import (
     MeasurementPoint,
     build_characterization_summary,
     impedance_from_series_divider,
     parse_ohms_label,
+    scale_series_to_si,
     source_phasor_from_lockin_reference,
 )
 
@@ -90,6 +93,18 @@ class ImpedanceMathTest(unittest.TestCase):
         self.assertIn("Resumen Inductor", summary["lines"][0])
         self.assertIn("44.4 mH", summary["lines"][0])
         self.assertEqual(summary["used_points"], 3)
+
+    def test_scale_series_to_si_uses_readable_capacitance_unit(self) -> None:
+        scaled, unit = scale_series_to_si(np.array([47e-9, 100e-9, math.nan]), "F")
+
+        self.assertEqual(unit, "nF")
+        self.assertAlmostEqual(float(scaled[1]), 100.0)
+
+    def test_scale_series_to_si_uses_readable_impedance_unit(self) -> None:
+        scaled, unit = scale_series_to_si(np.array([1_500.0, 2_200.0]), "Î©")
+
+        self.assertEqual(unit, "kÎ©")
+        self.assertAlmostEqual(float(scaled[0]), 1.5)
 
 
 if __name__ == "__main__":
